@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#1a1a2e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Weekend Workshop</title>
+<link rel="manifest" href="manifest.json">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { background:#0f0f1e; overflow-y:scroll; }
+  input,textarea,select,button { font-family:'DM Sans',sans-serif; }
+  ::-webkit-scrollbar { width:6px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:rgba(232,168,56,0.2); border-radius:3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+// Inline manifest creation
+if ('serviceWorker' in navigator) {
+  const swCode = `
+    const CACHE = 'ww-v1';
+    const URLS = ['/'];
+    self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(URLS))));
+    self.addEventListener('fetch', e => e.respondWith(caches.match(e.request).then(r => r || fetch(e.request))));
+  `;
+  const swBlob = new Blob([swCode], {type:'application/javascript'});
+  const swUrl = URL.createObjectURL(swBlob);
+  navigator.serviceWorker.register(swUrl).catch(()=>{});
+}
+
+// Create manifest dynamically
+const manifest = {
+  name: "Weekend Workshop",
+  short_name: "Workshop",
+  description: "Plan your weekend projects based on weather",
+  start_url: ".",
+  display: "standalone",
+  background_color: "#0f0f1e",
+  theme_color: "#1a1a2e",
+  icons: [{
+    src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔧</text></svg>",
+    sizes: "any", type: "image/svg+xml"
+  }]
+};
+const mBlob = new Blob([JSON.stringify(manifest)], {type:'application/json'});
+const mUrl = URL.createObjectURL(mBlob);
+document.querySelector('link[rel=manifest]').href = mUrl;
+</script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ─── Constants ───
+const CATEGORIES = [
+  { id:"outdoor", label:"Outdoor", icon:"☀️", color:"#E8A838" },
+  { id:"indoor", label:"Indoor", icon:"🏠", color:"#6B8FD4" },
+];
+const PRIORITIES = [
+  { id:"high", label:"High", color:"#D4453A" },
+  { id:"medium", label:"Medium", color:"#E8A838" },
+  { id:"low", label:"Low", color:"#7BA883" },
+];
+const TIME_ESTIMATES = ["< 30 min","30 min – 1 hr","1 – 2 hrs","2 – 4 hrs","Half day","Full day"];
+const DAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+const F = "'DM Sans', sans-serif";
+const DF = "'Playfair Display', Georgia, serif";
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+const ytUrl = (n) => `https://www.youtube.com/results?search_query=${encodeURIComponent(n+" how to DIY")}`;
+const OWM_KEY = "90fc7bb1c9b3f48d76c82656fe6930cc";
+
+// ─── localStorage helpers ───
+function load(key, fb) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fb; } catch { return fb; }
+}
+function save(key, v) {
+  try { localStorage.setItem(key, JSON.stringify(v)); } catch(e) { console.error(e); }
+}
+
+// ─── Weather helpers ───
+function weatherIcon(code) {
+  if (!code) return "🌡️";
+  const c = String(code);
+  if (c.startsWith("2")) return "⛈️";
+  if (c.startsWith("3")) return "🌦️";
+  if (c.startsWith("5")) return "🌧️";
+  if (c.startsWith("6")) return "❄️";
+  if (c === "800") return "☀️";
+  if (c.startsWith("80")) return "🌤️";
+  return "🌥️";
+}
+
+const DEFAULT_THRESHOLDS = { rainPct:50, tempMin:35, tempMax:100, windMax:25 };
+
+function isOutdoorWeather(day, thresholds) {
+  if (!day) return true;
+  const t = thresholds || DEFAULT_THRESHOLDS;
+  const cs = String(day.weather?.[0]?.id || 800);
+  if (cs.startsWith("2")||cs.startsWith("3")||cs.startsWith("5")||cs.startsWith("6")) return false;
+  if (day.temp?.max !== undefined && day.temp.max < t.tempMin) return false;
+  if (day.temp?.max !== undefined && day.temp.max > t.tempMax) return false;
+  if (day.wind_speed > t.windMax) return false;
+  if (day.pop > t.rainPct / 100) return false;
+  return true;
+}
+
+function getWeekendDays(list) {
+  if (!list) return [];
+  return list.filter(d => { const dow = new Date(d.dt*1000).getDay(); return dow===0||dow===6; }).slice(0,2);
+}
+
+// ─── Shared Styles ───
+const IS = { width:"100%",padding:"10px 14px",borderRadius:8,border:"2px solid rgba(232,168,56,0.2)",background:"rgba(255,255,255,0.03)",color:"#e0e0e0",fontSize:15,fontFamily:F,outline:"none",boxSizing:"border-box" };
+const LS = { fontFamily:F,fontSize:12,fontWeight:600,color:"rgba(255,255,255,0.5)",textTransform:"uppercase",letterSpacing:"1px",marginBottom:6,display:"block" };
+const SB = { padding:"5px 12px",borderRadius:6,border:"none",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:F };
+
+function gcalUrl({ title, desc, day, hour, minute }) {
+  const now=new Date(), cd=now.getDay(), td=DAYS.indexOf(day);
+  let du=(td-cd+7)%7; if(du===0)du=7;
+  const s=new Date(now); s.setDate(now.getDate()+du); s.setHours(hour,minute,0,0);
+  const e=new Date(s); e.setMinutes(e.getMinutes()+30);
+  const fm=(d)=>d.toISOString().replace(/[-:]/g,"").replace(/\.\d{3}/,"");
+  return `https://calendar.google.com/calendar/render?${new URLSearchParams({action:"TEMPLATE",text:title,details:desc,dates:`${fm(s)}/${fm(e)}`,recur:"RRULE:FREQ=WEEKLY"})}`;
+}
+
+// ─── Header ───
+function Header({ view, setView, count }) {
+  return (
+    <div style={{background:"linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%)",padding:"28px 24px 20px",borderBottom:"3px solid #E8A838",position:"relative",overflow:"hidden"}}>
+      <div style={{position:"absolute",top:0,left:0,right:0,bottom:0,background:"repeating-linear-gradient(45deg,transparent,transparent 20px,rgba(232,168,56,0.03) 20px,rgba(232,168,56,0.03) 40px)"}} />
+      <div style={{position:"relative",zIndex:1,maxWidth:640,margin:"0 auto"}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:6}}>
+          <span style={{fontSize:32}}>🔧</span>
+          <h1 style={{fontFamily:DF,fontSize:28,fontWeight:800,color:"#E8A838",margin:0}}>Weekend Workshop</h1>
+        </div>
+        <p style={{fontFamily:F,color:"rgba(255,255,255,0.55)",fontSize:14,margin:"0 0 18px 44px"}}>{count} project{count!==1?"s":""} in your queue</p>
+        <div style={{display:"flex",gap:6,marginLeft:44,flexWrap:"wrap"}}>
+          {[{k:"projects",l:"Projects"},{k:"plan",l:"Weekend Plan"},{k:"completed",l:"Completed"},{k:"reminders",l:"⏰ Reminders"}].map(({k,l})=>(
+            <button key={k} onClick={()=>setView(k)} style={{fontFamily:F,padding:"7px 14px",borderRadius:6,border:"none",fontSize:13,fontWeight:600,cursor:"pointer",background:view===k?"#E8A838":"rgba(255,255,255,0.08)",color:view===k?"#1a1a2e":"rgba(255,255,255,0.6)"}}>{l}</button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Materials ───
+function Materials({ items, onChange }) {
+  const add=()=>onChange([...items,{id:uid(),name:"",got:false}]);
+  const upd=(id,f,v)=>onChange(items.map(m=>m.id===id?{...m,[f]:v}:m));
+  const rm=(id)=>onChange(items.filter(m=>m.id!==id));
+  return (
+    <div style={{marginTop:8}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+        <label style={{...LS,margin:0}}>Materials / Shopping List</label>
+        <button onClick={add} style={{...SB,background:"rgba(232,168,56,0.12)",color:"#E8A838"}}>+ Add Item</button>
+      </div>
+      {items.map(m=>(
+        <div key={m.id} style={{display:"flex",gap:8,alignItems:"center",marginBottom:6}}>
+          <button onClick={()=>upd(m.id,"got",!m.got)} style={{width:26,height:26,borderRadius:6,border:"2px solid",borderColor:m.got?"#7BA883":"rgba(255,255,255,0.2)",background:m.got?"rgba(123,168,131,0.2)":"transparent",color:m.got?"#7BA883":"transparent",fontSize:13,cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>{m.got?"✓":""}</button>
+          <input value={m.name} onChange={e=>upd(m.id,"name",e.target.value)} placeholder="e.g. plumber's tape, wrench..." style={{...IS,padding:"7px 10px",fontSize:13,textDecoration:m.got?"line-through":"none",opacity:m.got?0.5:1}} />
+          <button onClick={()=>rm(m.id)} style={{width:26,height:26,borderRadius:6,border:"none",background:"rgba(212,69,58,0.1)",color:"#D4453A",fontSize:12,cursor:"pointer",flexShrink:0}}>✕</button>
+        </div>
+      ))}
+      {items.length===0&&<p style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.3)",margin:"4px 0 0"}}>No materials added yet.</p>}
+    </div>
+  );
+}
+
+// ─── Notes ───
+function Notes({ notes, onChange }) {
+  const [txt,setTxt]=useState("");
+  const fRef=useRef(null);
+  const addNote=()=>{if(!txt.trim())return;onChange([...notes,{id:uid(),text:txt.trim(),ts:Date.now(),photo:null}]);setTxt("");};
+  const addPhoto=(nid)=>{fRef.current?.setAttribute("data-nid",nid||"__new__");fRef.current?.click();};
+  const onFile=(e)=>{
+    const file=e.target.files?.[0];if(!file)return;
+    const nid=e.target.getAttribute("data-nid");
+    const r=new FileReader();
+    r.onload=(ev)=>{
+      const d=ev.target.result;
+      if(nid==="__new__")onChange([...notes,{id:uid(),text:"Photo update",ts:Date.now(),photo:d}]);
+      else onChange(notes.map(n=>n.id===nid?{...n,photo:d}:n));
+    };
+    r.readAsDataURL(file);e.target.value="";
+  };
+  return (
+    <div style={{marginTop:12}}>
+      <label style={{...LS,marginBottom:10}}>Progress Notes</label>
+      <input ref={fRef} type="file" accept="image/*" style={{display:"none"}} onChange={onFile} />
+      {notes.map(n=>(
+        <div key={n.id} style={{background:"rgba(255,255,255,0.03)",borderRadius:8,padding:10,marginBottom:8,borderLeft:"3px solid rgba(232,168,56,0.3)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div style={{flex:1}}>
+              <span style={{fontFamily:F,fontSize:11,color:"rgba(255,255,255,0.35)"}}>{new Date(n.ts).toLocaleDateString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})}</span>
+              <p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.7)",margin:"4px 0 0"}}>{n.text}</p>
+            </div>
+            <div style={{display:"flex",gap:4}}>
+              {!n.photo&&<button onClick={()=>addPhoto(n.id)} style={{...SB,background:"rgba(255,255,255,0.06)",color:"rgba(255,255,255,0.4)",padding:"3px 8px"}}>📷</button>}
+              <button onClick={()=>onChange(notes.filter(x=>x.id!==n.id))} style={{...SB,background:"rgba(212,69,58,0.08)",color:"#D4453A",padding:"3px 8px"}}>✕</button>
+            </div>
+          </div>
+          {n.photo&&<img src={n.photo} alt="" style={{width:"100%",maxHeight:200,objectFit:"cover",borderRadius:6,marginTop:8}} />}
+        </div>
+      ))}
+      <div style={{display:"flex",gap:8,marginTop:8}}>
+        <input value={txt} onChange={e=>setTxt(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addNote()} placeholder="Add a progress note..." style={{...IS,padding:"8px 12px",fontSize:13}} />
+        <button onClick={()=>addPhoto("__new__")} style={{...SB,background:"rgba(232,168,56,0.12)",color:"#E8A838",padding:"8px 10px",flexShrink:0}}>📷</button>
+        <button onClick={addNote} style={{...SB,background:txt.trim()?"#E8A838":"rgba(232,168,56,0.2)",color:txt.trim()?"#1a1a2e":"rgba(26,26,46,0.5)",padding:"8px 14px",flexShrink:0,cursor:txt.trim()?"pointer":"default"}}>Add</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Project Form ───
+function ProjectForm({ onAdd, onCancel, editProject:ep }) {
+  const [name,setName]=useState(ep?.name||"");
+  const [desc,setDesc]=useState(ep?.description||"");
+  const [cat,setCat]=useState(ep?.category||"outdoor");
+  const [pri,setPri]=useState(ep?.priority||"medium");
+  const [time,setTime]=useState(ep?.timeEstimate||"1 – 2 hrs");
+  const [mats,setMats]=useState(ep?.materials||[]);
+  const submit=()=>{if(!name.trim())return;onAdd({id:ep?.id||uid(),name:name.trim(),description:desc.trim(),category:cat,priority:pri,timeEstimate:time,materials:mats,notes:ep?.notes||[],completed:ep?.completed||false,createdAt:ep?.createdAt||Date.now()});};
+  const sel={...IS,cursor:"pointer",appearance:"none",backgroundImage:"url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23E8A838' d='M6 8L1 3h10z'/%3E%3C/svg%3E\")",backgroundRepeat:"no-repeat",backgroundPosition:"right 12px center",paddingRight:32};
+  return (
+    <div style={{background:"rgba(255,255,255,0.04)",borderRadius:12,padding:20,border:"1px solid rgba(232,168,56,0.15)",marginBottom:16}}>
+      <div style={{marginBottom:14}}><label style={LS}>Project Name *</label><input style={IS} value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Install new kitchen faucet" /></div>
+      <div style={{marginBottom:14}}><label style={LS}>Description</label><textarea style={{...IS,minHeight:60,resize:"vertical"}} value={desc} onChange={e=>setDesc(e.target.value)} placeholder="Any details or notes..." /></div>
+      <div style={{marginBottom:14}}>
+        <label style={LS}>Category</label>
+        <div style={{display:"flex",gap:8}}>
+          {CATEGORIES.map(c=><button key={c.id} onClick={()=>setCat(c.id)} style={{flex:1,padding:"8px 12px",borderRadius:8,border:"2px solid",borderColor:cat===c.id?c.color:"rgba(255,255,255,0.1)",background:cat===c.id?`${c.color}18`:"transparent",color:cat===c.id?c.color:"rgba(255,255,255,0.5)",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:F}}>{c.icon} {c.label}</button>)}
+        </div>
+      </div>
+      <div style={{display:"flex",gap:12,marginBottom:14,flexWrap:"wrap"}}>
+        <div style={{flex:"1 1 200px"}}>
+          <label style={LS}>Priority</label>
+          <div style={{display:"flex",gap:8}}>
+            {PRIORITIES.map(p=><button key={p.id} onClick={()=>setPri(p.id)} style={{flex:1,padding:"8px 10px",borderRadius:8,border:"2px solid",borderColor:pri===p.id?p.color:"rgba(255,255,255,0.1)",background:pri===p.id?`${p.color}18`:"transparent",color:pri===p.id?p.color:"rgba(255,255,255,0.5)",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:F,textTransform:"capitalize"}}>{p.label}</button>)}
+          </div>
+        </div>
+        <div style={{flex:"1 1 180px"}}>
+          <label style={LS}>Time Estimate</label>
+          <select value={time} onChange={e=>setTime(e.target.value)} style={sel}>
+            {TIME_ESTIMATES.map(t=><option key={t} value={t} style={{background:"#1a1a2e"}}>{t}</option>)}
+          </select>
+        </div>
+      </div>
+      <Materials items={mats} onChange={setMats} />
+      <div style={{display:"flex",gap:10,justifyContent:"flex-end",marginTop:16}}>
+        <button onClick={onCancel} style={{padding:"9px 20px",borderRadius:8,border:"1px solid rgba(255,255,255,0.15)",background:"transparent",color:"rgba(255,255,255,0.6)",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:F}}>Cancel</button>
+        <button onClick={submit} style={{padding:"9px 24px",borderRadius:8,border:"none",background:name.trim()?"#E8A838":"rgba(232,168,56,0.3)",color:name.trim()?"#1a1a2e":"rgba(26,26,46,0.5)",fontSize:14,fontWeight:700,cursor:name.trim()?"pointer":"default",fontFamily:F}}>{ep?"Save Changes":"Add Project"}</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Project Card ───
+function Card({ project:p, onComplete, onDelete, onEdit, onUpdate }) {
+  const [exp,setExp]=useState(false);
+  const cat=CATEGORIES.find(c=>c.id===p.category),pri=PRIORITIES.find(x=>x.id===p.priority);
+  const mc=p.materials?.length||0,mg=p.materials?.filter(m=>m.got).length||0,nc=p.notes?.length||0;
+  const togMat=(mid)=>onUpdate({...p,materials:p.materials.map(m=>m.id===mid?{...m,got:!m.got}:m)});
+  const badge=(bg,col,txt)=>(<span style={{fontSize:11,fontWeight:600,padding:"2px 8px",borderRadius:4,background:bg,color:col,fontFamily:F}}>{txt}</span>);
+  return (
+    <div style={{background:"rgba(255,255,255,0.04)",borderRadius:12,padding:16,border:"1px solid rgba(255,255,255,0.08)",borderLeft:`4px solid ${cat?.color||"#888"}`,marginBottom:10}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
+        <div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={()=>setExp(!exp)}>
+          <h3 style={{fontFamily:DF,fontSize:17,fontWeight:700,color:"#e0e0e0",margin:"0 0 4px"}}>{cat?.icon} {p.name}</h3>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:p.description?8:0}}>
+            {badge(`${pri?.color}22`,pri?.color,pri?.label)}
+            {badge("rgba(255,255,255,0.06)","rgba(255,255,255,0.5)",`⏱ ${p.timeEstimate}`)}
+            {mc>0&&badge(mg===mc?"rgba(123,168,131,0.15)":"rgba(255,255,255,0.06)",mg===mc?"#7BA883":"rgba(255,255,255,0.5)",`🛒 ${mg}/${mc}`)}
+            {nc>0&&badge("rgba(255,255,255,0.06)","rgba(255,255,255,0.5)",`📝 ${nc}`)}
+          </div>
+          {p.description&&<p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.45)",margin:0,lineHeight:1.5}}>{p.description}</p>}
+          <span style={{fontFamily:F,fontSize:11,color:"rgba(255,255,255,0.25)",marginTop:4,display:"inline-block"}}>{exp?"▲ Collapse":"▼ Tap for details"}</span>
+        </div>
+        <div style={{display:"flex",gap:6,flexShrink:0,flexWrap:"wrap",justifyContent:"flex-end"}}>
+          <a href={ytUrl(p.name)} target="_blank" rel="noopener noreferrer" style={{width:32,height:32,borderRadius:6,background:"rgba(255,0,0,0.12)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,textDecoration:"none"}}>▶️</a>
+          <button onClick={()=>onEdit(p)} style={{width:32,height:32,borderRadius:6,background:"rgba(255,255,255,0.06)",border:"none",color:"rgba(255,255,255,0.5)",fontSize:14,cursor:"pointer"}}>✏️</button>
+          <button onClick={()=>onComplete(p.id)} style={{width:32,height:32,borderRadius:6,background:"rgba(123,168,131,0.15)",border:"none",color:"#7BA883",fontSize:14,cursor:"pointer"}}>✓</button>
+          <button onClick={()=>onDelete(p.id)} style={{width:32,height:32,borderRadius:6,background:"rgba(212,69,58,0.1)",border:"none",color:"#D4453A",fontSize:14,cursor:"pointer"}}>✕</button>
+        </div>
+      </div>
+      {exp&&(
+        <div style={{marginTop:14,paddingTop:14,borderTop:"1px solid rgba(255,255,255,0.06)"}}>
+          {mc>0&&<div style={{marginBottom:12}}>
+            <label style={{...LS,marginBottom:8}}>Materials ({mg}/{mc} ready)</label>
+            {p.materials.map(m=>(
+              <div key={m.id} style={{display:"flex",gap:8,alignItems:"center",marginBottom:4}}>
+                <button onClick={()=>togMat(m.id)} style={{width:22,height:22,borderRadius:5,border:"2px solid",borderColor:m.got?"#7BA883":"rgba(255,255,255,0.2)",background:m.got?"rgba(123,168,131,0.2)":"transparent",color:m.got?"#7BA883":"transparent",fontSize:11,cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>{m.got?"✓":""}</button>
+                <span style={{fontFamily:F,fontSize:13,color:m.got?"rgba(255,255,255,0.35)":"rgba(255,255,255,0.65)",textDecoration:m.got?"line-through":"none"}}>{m.name||"(unnamed)"}</span>
+              </div>
+            ))}
+          </div>}
+          <Notes notes={p.notes||[]} onChange={(nn)=>onUpdate({...p,notes:nn})} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Weekend Plan ───
+const MANUAL_CONDITIONS = [
+  { label:"☀️ Sunny & Clear", id:800, desc:"clear sky", pop:0, wind:5, hi:75, lo:55 },
+  { label:"🌤️ Partly Cloudy", id:802, desc:"scattered clouds", pop:0.1, wind:8, hi:70, lo:52 },
+  { label:"🌧️ Rainy", id:500, desc:"light rain", pop:0.8, wind:10, hi:60, lo:48 },
+  { label:"❄️ Cold & Snowy", id:601, desc:"snow", pop:0.7, wind:12, hi:28, lo:18 },
+  { label:"🌬️ Windy", id:800, desc:"clear but windy", pop:0.1, wind:30, hi:65, lo:50 },
+  { label:"🥵 Hot & Humid", id:800, desc:"hot and humid", pop:0.15, wind:5, hi:102, lo:80 },
+];
+
+function ThresholdSettings({ thresholds, onChange }) {
+  const [open,setOpen]=useState(false);
+  const t=thresholds;
+  const row={display:"flex",gap:12,alignItems:"center",marginBottom:10,flexWrap:"wrap"};
+  const lbl={fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.55)",minWidth:130};
+  const inp=(val,set,min,max,unit)=>(<div style={{display:"flex",alignItems:"center",gap:6}}>
+    <input type="range" min={min} max={max} value={val} onChange={e=>set(+e.target.value)} style={{width:120,accentColor:"#E8A838"}} />
+    <span style={{fontFamily:F,fontSize:13,fontWeight:600,color:"#E8A838",minWidth:55}}>{val}{unit}</span>
+  </div>);
+  return (
+    <div style={{background:"rgba(255,255,255,0.03)",borderRadius:10,border:"1px solid rgba(255,255,255,0.06)",marginBottom:16,overflow:"hidden"}}>
+      <button onClick={()=>setOpen(!open)} style={{width:"100%",padding:"12px 16px",border:"none",background:"transparent",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
+        <span style={{fontFamily:F,fontSize:13,fontWeight:600,color:"rgba(255,255,255,0.6)"}}>⚙️ Outdoor Weather Thresholds</span>
+        <span style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.35)"}}>{open?"▲ Hide":"▼ Customize"}</span>
+      </button>
+      {open&&<div style={{padding:"4px 16px 16px"}}>
+        <p style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.35)",margin:"0 0 14px"}}>Rain/snow/storms are always indoor. Adjust these thresholds for everything else:</p>
+        <div style={row}><span style={lbl}>💧 Max rain chance</span>{inp(t.rainPct,v=>onChange({...t,rainPct:v}),10,90,"%")}</div>
+        <div style={row}><span style={lbl}>🥶 Min temperature</span>{inp(t.tempMin,v=>onChange({...t,tempMin:v}),0,60,"°F")}</div>
+        <div style={row}><span style={lbl}>🥵 Max temperature</span>{inp(t.tempMax,v=>onChange({...t,tempMax:v}),80,120,"°F")}</div>
+        <div style={row}><span style={lbl}>💨 Max wind speed</span>{inp(t.windMax,v=>onChange({...t,windMax:v}),10,50," mph")}</div>
+        <button onClick={()=>onChange({...DEFAULT_THRESHOLDS})} style={{...SB,background:"rgba(255,255,255,0.06)",color:"rgba(255,255,255,0.4)",marginTop:4}}>Reset to defaults</button>
+      </div>}
+    </div>
+  );
+}
+
+function Plan({ projects }) {
+  const [sug,setSug]=useState(null);
+  const [weather,setWeather]=useState(null);
+  const [loading,setLoading]=useState(false);
+  const [error,setError]=useState(null);
+  const [city,setCity]=useState(()=>load("ww-saved-city",""));
+  const [savedCity]=useState(()=>load("ww-saved-city",""));
+  const [mode,setMode]=useState("api");
+  const [manualIdx,setManualIdx]=useState(0);
+  const [thresholds,setThresholds]=useState(()=>load("ww-thresholds",{...DEFAULT_THRESHOLDS}));
+  const active=projects.filter(p=>!p.completed);
+
+  const updateThresholds=(t)=>{setThresholds(t);save("ww-thresholds",t);setSug(null);};
+
+  const fetchWeather=async(lat,lon,cityName)=>{
+    setLoading(true);setError(null);setWeather(null);setSug(null);
+    try {
+      let finalLat=lat,finalLon=lon,resolvedCity=cityName||"";
+      if(lat==null&&cityName){
+        const geoRes=await fetch(`https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(cityName)}&limit=1&appid=${OWM_KEY}`);
+        if(!geoRes.ok)throw new Error("City not found");
+        const geoData=await geoRes.json();
+        if(!geoData.length)throw new Error("City not found. Try a different name.");
+        finalLat=geoData[0].lat;finalLon=geoData[0].lon;
+        resolvedCity=`${geoData[0].name}${geoData[0].state?", "+geoData[0].state:""}`;
+      }
+      const res=await fetch(`https://api.openweathermap.org/data/3.0/onecall?lat=${finalLat}&lon=${finalLon}&exclude=minutely,hourly,alerts&units=imperial&appid=${OWM_KEY}`);
+      if(!res.ok){
+        const res2=await fetch(`https://api.openweathermap.org/data/2.5/forecast?lat=${finalLat}&lon=${finalLon}&units=imperial&appid=${OWM_KEY}`);
+        if(!res2.ok)throw new Error("Weather API error. Check your API key.");
+        const data2=await res2.json();
+        const grouped={};
+        data2.list.forEach(item=>{
+          const date=item.dt_txt.split(" ")[0];
+          const dow=new Date(date+"T12:00:00").getDay();
+          if(dow===0||dow===6){
+            if(!grouped[date])grouped[date]={dt:item.dt,temp:{min:999,max:-999},weather:item.weather,pop:0,wind_speed:0};
+            grouped[date].temp.min=Math.min(grouped[date].temp.min,item.main.temp_min);
+            grouped[date].temp.max=Math.max(grouped[date].temp.max,item.main.temp_max);
+            grouped[date].pop=Math.max(grouped[date].pop,item.pop||0);
+            grouped[date].wind_speed=Math.max(grouped[date].wind_speed,item.wind?.speed||0);
+          }
+        });
+        setWeather({daily:Object.values(grouped).slice(0,2),city:resolvedCity});
+      } else {
+        const data=await res.json();
+        setWeather({daily:getWeekendDays(data.daily),city:resolvedCity});
+      }
+      if(resolvedCity)save("ww-saved-city",resolvedCity);
+      setMode("api");
+    } catch(e){setError((e.message||"Failed to fetch")+" — Try Manual Mode as a fallback.");}
+    setLoading(false);
+  };
+
+  const useGPS=()=>{
+    if(!navigator.geolocation){setError("Geolocation not supported. Use city search or Manual Mode.");return;}
+    navigator.geolocation.getCurrentPosition(pos=>fetchWeather(pos.coords.latitude,pos.coords.longitude,"Your Location"),()=>setError("Location denied. Try city search or Manual Mode."));
+  };
+  const useCity=()=>{if(!city.trim())return;fetchWeather(null,null,city.trim());};
+  const useManual=()=>{setMode("manual");setError(null);setWeather(null);setSug(null);};
+
+  const buildManualDay=(mc)=>{
+    const now=new Date(),dow=now.getDay();
+    let off=(6-dow+7)%7;if(off===0)off=7;
+    const sat=new Date(now);sat.setDate(now.getDate()+off);sat.setHours(12,0,0,0);
+    return {dt:Math.floor(sat.getTime()/1000),temp:{min:mc.lo,max:mc.hi},weather:[{id:mc.id,description:mc.desc}],pop:mc.pop,wind_speed:mc.wind};
+  };
+
+  const gen=(oo)=>{
+    const pref=oo?"outdoor":"indoor",po={high:0,medium:1,low:2};
+    const sorted=[...active].sort((a,b)=>po[a.priority]-po[b.priority]);
+    const p1=sorted.filter(p=>p.category===pref),p2=sorted.filter(p=>p.category!==pref);
+    const picks=[];if(p1[0])picks.push(p1[0]);if(p1[1])picks.push(p1[1]);else if(p2[0])picks.push(p2[0]);
+    setSug(picks);
+  };
+
+  let outdoorOk=true,weatherLabel="";
+  if(mode==="api"&&weather?.daily?.length){
+    const best=weather.daily.reduce((b,d)=>{const s=(isOutdoorWeather(d,thresholds)?10:0)+(d.pop!=null?(1-d.pop)*5:3);return s>(b.score||0)?{...d,score:s}:b;},{});
+    outdoorOk=isOutdoorWeather(best,thresholds);weatherLabel=weather.city+" forecast";
+  } else if(mode==="manual"){
+    outdoorOk=isOutdoorWeather(buildManualDay(MANUAL_CONDITIONS[manualIdx]),thresholds);
+    weatherLabel=MANUAL_CONDITIONS[manualIdx].label+" (manual)";
+  }
+
+  const suggestBtn=(oo)=>(<button onClick={()=>gen(oo)} disabled={active.length===0} style={{padding:"12px 28px",borderRadius:8,border:"none",background:active.length>0?"linear-gradient(135deg,#E8A838,#D4953A)":"rgba(232,168,56,0.2)",color:active.length>0?"#1a1a2e":"rgba(26,26,46,0.5)",fontSize:15,fontWeight:700,cursor:active.length>0?"pointer":"default",fontFamily:F,width:"100%",boxShadow:active.length>0?"0 4px 20px rgba(232,168,56,0.3)":"none"}}>🎯 Suggest This Weekend's Projects</button>);
+
+  const renderSuggestions=()=>sug&&(
+    <div style={{background:"linear-gradient(135deg,rgba(232,168,56,0.08),rgba(232,168,56,0.02))",borderRadius:12,padding:20,border:"1px solid rgba(232,168,56,0.2)",marginTop:16}}>
+      <h3 style={{fontFamily:DF,fontSize:20,fontWeight:700,color:"#E8A838",margin:"0 0 4px"}}>🛠️ This Weekend's Plan</h3>
+      <p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.45)",margin:"0 0 16px"}}>Based on {weatherLabel}</p>
+      {sug.length===0?<p style={{fontFamily:F,fontSize:14,color:"rgba(255,255,255,0.5)",textAlign:"center",padding:20}}>No matching projects. Add more!</p>:
+      sug.map((p,i)=>{
+        const cat=CATEGORIES.find(c=>c.id===p.category),pri=PRIORITIES.find(x=>x.id===p.priority);
+        const mc2=p.materials?.length||0,mg2=p.materials?.filter(m=>m.got).length||0;
+        return (
+          <div key={p.id} style={{background:"rgba(255,255,255,0.05)",borderRadius:10,padding:16,marginBottom:i<sug.length-1?10:0,borderLeft:`4px solid ${cat?.color}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <span style={{fontFamily:F,fontSize:11,fontWeight:700,color:"#E8A838",textTransform:"uppercase",letterSpacing:"1px"}}>Project {i+1}</span>
+              <span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:4,background:`${pri?.color}22`,color:pri?.color,fontFamily:F,textTransform:"uppercase"}}>{pri?.label} priority</span>
+            </div>
+            <h4 style={{fontFamily:DF,fontSize:17,fontWeight:700,color:"#e0e0e0",margin:"0 0 6px"}}>{cat?.icon} {p.name}</h4>
+            {p.description&&<p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.45)",margin:"0 0 10px"}}>{p.description}</p>}
+            {mc2>0&&<p style={{fontFamily:F,fontSize:12,margin:"0 0 8px",color:mg2===mc2?"#7BA883":"rgba(255,255,255,0.5)"}}>🛒 Materials: {mg2}/{mc2} ready{mg2<mc2?" — you may need to shop first!":""}</p>}
+            <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+              <span style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.4)"}}>⏱ {p.timeEstimate}</span>
+              <a href={ytUrl(p.name)} target="_blank" rel="noopener noreferrer" style={{fontFamily:F,fontSize:12,fontWeight:600,color:"#E8A838",textDecoration:"none",padding:"4px 12px",borderRadius:6,background:"rgba(232,168,56,0.12)"}}>▶ Watch How-To Videos</a>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <div>
+      <ThresholdSettings thresholds={thresholds} onChange={updateThresholds} />
+      <div style={{background:"rgba(255,255,255,0.04)",borderRadius:12,padding:20,border:"1px solid rgba(232,168,56,0.15)",marginBottom:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <label style={{...LS,margin:0}}>Weekend Weather</label>
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={()=>{setMode("api");setSug(null);}} style={{...SB,padding:"5px 10px",background:mode==="api"?"rgba(232,168,56,0.2)":"rgba(255,255,255,0.06)",color:mode==="api"?"#E8A838":"rgba(255,255,255,0.4)"}}>🌐 Live</button>
+            <button onClick={useManual} style={{...SB,padding:"5px 10px",background:mode==="manual"?"rgba(232,168,56,0.2)":"rgba(255,255,255,0.06)",color:mode==="manual"?"#E8A838":"rgba(255,255,255,0.4)"}}>✋ Manual</button>
+          </div>
+        </div>
+        {mode==="api"&&<>
+          <p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.45)",margin:"0 0 14px"}}>{savedCity?`Last checked: ${savedCity}. `:""}Get your local forecast to plan the perfect weekend.</p>
+          <div style={{display:"flex",gap:8,marginBottom:12}}>
+            <button onClick={useGPS} style={{padding:"10px 18px",borderRadius:8,border:"none",background:"linear-gradient(135deg,#E8A838,#D4953A)",color:"#1a1a2e",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:F,whiteSpace:"nowrap"}}>📍 Use My Location</button>
+            <span style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.3)",display:"flex",alignItems:"center"}}>or</span>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <input value={city} onChange={e=>setCity(e.target.value)} onKeyDown={e=>e.key==="Enter"&&useCity()} placeholder="Enter city name (e.g. Atlanta, GA)" style={{...IS,padding:"10px 14px",fontSize:14}} />
+            <button onClick={useCity} style={{padding:"10px 18px",borderRadius:8,border:"none",background:city.trim()?"#E8A838":"rgba(232,168,56,0.3)",color:city.trim()?"#1a1a2e":"rgba(26,26,46,0.5)",fontSize:13,fontWeight:700,cursor:city.trim()?"pointer":"default",fontFamily:F,flexShrink:0}}>Search</button>
+          </div>
+          {loading&&<p style={{fontFamily:F,fontSize:13,color:"#E8A838",marginTop:12,marginBottom:0}}>⏳ Fetching weather...</p>}
+          {error&&<p style={{fontFamily:F,fontSize:13,color:"#D4453A",marginTop:12,marginBottom:0}}>⚠️ {error}</p>}
+        </>}
+        {mode==="manual"&&<>
+          <p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.45)",margin:"0 0 12px"}}>Pick the conditions closest to this weekend's forecast:</p>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
+            {MANUAL_CONDITIONS.map((mc,i)=><button key={i} onClick={()=>{setManualIdx(i);setSug(null);}} style={{padding:"8px 14px",borderRadius:8,border:"2px solid",borderColor:manualIdx===i?"#E8A838":"rgba(255,255,255,0.08)",background:manualIdx===i?"rgba(232,168,56,0.12)":"transparent",color:manualIdx===i?"#E8A838":"rgba(255,255,255,0.5)",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:F}}>{mc.label}</button>)}
+          </div>
+          <div style={{background:"rgba(255,255,255,0.03)",borderRadius:8,padding:14,marginBottom:16,border:"1px solid rgba(255,255,255,0.06)"}}>
+            <p style={{fontFamily:F,fontSize:14,color:"rgba(255,255,255,0.7)",margin:0}}>{MANUAL_CONDITIONS[manualIdx].label} — {outdoorOk?"☀️ Good for outdoor — recommending outdoor first!":"🏠 Indoor conditions — recommending indoor first."}</p>
+          </div>
+          {suggestBtn(outdoorOk)}
+          {active.length===0&&<p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.35)",textAlign:"center",marginTop:10,marginBottom:0}}>Add some projects first!</p>}
+        </>}
+      </div>
+      {mode==="api"&&weather&&weather.daily?.length>0&&(
+        <div style={{background:"rgba(255,255,255,0.04)",borderRadius:12,padding:20,border:"1px solid rgba(232,168,56,0.15)",marginBottom:16}}>
+          <h3 style={{fontFamily:DF,fontSize:18,fontWeight:700,color:"#e0e0e0",margin:"0 0 14px"}}>📍 {weather.city} — Weekend Forecast</h3>
+          <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:16}}>
+            {weather.daily.map((d,i)=>{
+              const date=new Date(d.dt*1000);
+              const dayName=date.toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"});
+              const icon=weatherIcon(d.weather?.[0]?.id);
+              const outdoor=isOutdoorWeather(d,thresholds);
+              const desc=d.weather?.[0]?.description||"";
+              return (
+                <div key={i} style={{flex:"1 1 200px",background:outdoor?"rgba(232,168,56,0.08)":"rgba(107,143,212,0.08)",borderRadius:10,padding:16,border:`2px solid ${outdoor?"rgba(232,168,56,0.25)":"rgba(107,143,212,0.25)"}`}}>
+                  <p style={{fontFamily:F,fontSize:12,fontWeight:700,color:"rgba(255,255,255,0.5)",textTransform:"uppercase",letterSpacing:"0.5px",margin:"0 0 8px"}}>{dayName}</p>
+                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                    <span style={{fontSize:36}}>{icon}</span>
+                    <div>
+                      <p style={{fontFamily:F,fontSize:22,fontWeight:700,color:"#e0e0e0",margin:0}}>{d.temp?.max!=null?`${Math.round(d.temp.max)}°`:"--"}<span style={{fontSize:14,color:"rgba(255,255,255,0.4)",fontWeight:500}}> / {d.temp?.min!=null?`${Math.round(d.temp.min)}°`:"--"}</span></p>
+                      <p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.55)",margin:0,textTransform:"capitalize"}}>{desc}</p>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+                    {d.pop!=null&&<span style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.45)"}}>💧 {Math.round(d.pop*100)}% rain</span>}
+                    {d.wind_speed!=null&&<span style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.45)"}}>💨 {Math.round(d.wind_speed)} mph</span>}
+                  </div>
+                  <div style={{marginTop:10,padding:"6px 10px",borderRadius:6,background:outdoor?"rgba(232,168,56,0.15)":"rgba(107,143,212,0.15)"}}>
+                    <p style={{fontFamily:F,fontSize:12,fontWeight:700,color:outdoor?"#E8A838":"#6B8FD4",margin:0}}>{outdoor?"☀️ Good for outdoor projects":"🏠 Better for indoor projects"}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{background:"rgba(255,255,255,0.03)",borderRadius:8,padding:14,marginBottom:16,border:"1px solid rgba(255,255,255,0.06)"}}>
+            <p style={{fontFamily:F,fontSize:14,color:"rgba(255,255,255,0.7)",margin:0}}>{outdoorOk?"☀️ Decent weather — recommending outdoor projects first!":"🏠 Not great for outside — recommending indoor projects first."}</p>
+          </div>
+          {suggestBtn(outdoorOk)}
+          {active.length===0&&<p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.35)",textAlign:"center",marginTop:10,marginBottom:0}}>Add some projects first!</p>}
+        </div>
+      )}
+      {renderSuggestions()}
+    </div>
+  );
+}
+
+// ─── Completed ───
+function Completed({ projects, onDelete, onRestore }) {
+  const done=projects.filter(p=>p.completed);
+  if(!done.length) return <div style={{textAlign:"center",padding:"60px 20px",color:"rgba(255,255,255,0.35)",fontFamily:F}}><div style={{fontSize:48,marginBottom:12}}>🏗️</div><p style={{fontSize:15}}>No completed projects yet.</p><p style={{fontSize:13}}>Get to work this weekend!</p></div>;
+  return (
+    <div>
+      <p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.4)",marginBottom:12}}>{done.length} project{done.length!==1?"s":""} done — nice work! 💪</p>
+      {done.map(p=>{const cat=CATEGORIES.find(c=>c.id===p.category);return(
+        <div key={p.id} style={{background:"rgba(123,168,131,0.06)",borderRadius:10,padding:14,marginBottom:8,borderLeft:"4px solid rgba(123,168,131,0.4)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontFamily:DF,fontSize:15,color:"rgba(255,255,255,0.5)",textDecoration:"line-through"}}>{cat?.icon} {p.name}</span>
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={()=>onRestore(p.id)} style={{...SB,background:"rgba(232,168,56,0.12)",color:"#E8A838"}}>↩ Restore</button>
+            <button onClick={()=>onDelete(p.id)} style={{...SB,background:"rgba(212,69,58,0.1)",color:"#D4453A"}}>✕</button>
+          </div>
+        </div>
+      );})}
+    </div>
+  );
+}
+
+// ─── Reminders ───
+function Reminders() {
+  const [day,setDay]=useState("Friday"),[hr,setHr]=useState(18),[min,setMin]=useState(0),[notif,setNotif]=useState(null);
+  const url=gcalUrl({title:"🔧 Weekend Workshop – Pick your projects!",desc:"Time to open Weekend Workshop and choose your weekend projects!\n\nCheck the weather, pick 1-2 projects, and gather your materials.",day,hour:hr,minute:min});
+  const fmtTime=()=>{const h=hr%12||12;return`${h}:${min.toString().padStart(2,"0")} ${hr<12?"AM":"PM"}`};
+  const reqNotif=async()=>{
+    if(!("Notification" in window)){setNotif("nosup");return;}
+    const p=await Notification.requestPermission();
+    if(p==="granted"){setNotif("ok");new Notification("Weekend Workshop 🔧",{body:"Notifications enabled!"});}
+    else setNotif("denied");
+  };
+  const sel={...IS,cursor:"pointer",appearance:"none",backgroundImage:"url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23E8A838' d='M6 8L1 3h10z'/%3E%3C/svg%3E\")",backgroundRepeat:"no-repeat",backgroundPosition:"right 12px center",paddingRight:32};
+  return (
+    <div>
+      <div style={{background:"rgba(255,255,255,0.04)",borderRadius:12,padding:20,border:"1px solid rgba(232,168,56,0.15)",marginBottom:16}}>
+        <h3 style={{fontFamily:DF,fontSize:20,fontWeight:700,color:"#E8A838",margin:"0 0 4px"}}>⏰ Weekly Reminder</h3>
+        <p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.45)",margin:"0 0 18px"}}>Choose when to be reminded to pick your weekend projects.</p>
+        <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:16}}>
+          <div style={{flex:"1 1 160px"}}><label style={LS}>Day of Week</label><select value={day} onChange={e=>setDay(e.target.value)} style={sel}>{DAYS.map(d=><option key={d} value={d} style={{background:"#1a1a2e"}}>{d}</option>)}</select></div>
+          <div style={{flex:"1 1 100px"}}><label style={LS}>Hour</label><select value={hr} onChange={e=>setHr(+e.target.value)} style={sel}>{Array.from({length:24},(_,i)=><option key={i} value={i} style={{background:"#1a1a2e"}}>{(i%12||12)} {i<12?"AM":"PM"}</option>)}</select></div>
+          <div style={{flex:"1 1 100px"}}><label style={LS}>Minute</label><select value={min} onChange={e=>setMin(+e.target.value)} style={sel}>{[0,15,30,45].map(m=><option key={m} value={m} style={{background:"#1a1a2e"}}>{m.toString().padStart(2,"0")}</option>)}</select></div>
+        </div>
+        <div style={{background:"rgba(255,255,255,0.03)",borderRadius:8,padding:14,border:"1px solid rgba(255,255,255,0.06)"}}>
+          <p style={{fontFamily:F,fontSize:14,color:"rgba(255,255,255,0.7)",margin:0}}>📅 Reminder: every <strong style={{color:"#E8A838"}}>{day}</strong> at <strong style={{color:"#E8A838"}}>{fmtTime()}</strong></p>
+        </div>
+      </div>
+      <div style={{background:"rgba(255,255,255,0.04)",borderRadius:12,padding:20,border:"1px solid rgba(232,168,56,0.15)",marginBottom:16}}>
+        <h3 style={{fontFamily:DF,fontSize:18,fontWeight:700,color:"#e0e0e0",margin:"0 0 8px"}}>📅 Google Calendar</h3>
+        <p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.45)",margin:"0 0 14px"}}>Add a recurring weekly event every {day} at {fmtTime()}.</p>
+        <a href={url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",alignItems:"center",gap:8,padding:"12px 24px",borderRadius:8,border:"none",background:"linear-gradient(135deg,#4285F4,#3367D6)",color:"white",fontSize:14,fontWeight:700,fontFamily:F,textDecoration:"none",boxShadow:"0 4px 16px rgba(66,133,244,0.3)"}}>📅 Add to Google Calendar</a>
+      </div>
+      <div style={{background:"rgba(255,255,255,0.04)",borderRadius:12,padding:20,border:"1px solid rgba(232,168,56,0.15)"}}>
+        <h3 style={{fontFamily:DF,fontSize:18,fontWeight:700,color:"#e0e0e0",margin:"0 0 8px"}}>🔔 Browser Notifications</h3>
+        <p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.45)",margin:"0 0 14px"}}>Enable browser notifications. For reliable reminders, Google Calendar above is recommended.</p>
+        <button onClick={reqNotif} style={{padding:"12px 24px",borderRadius:8,border:"none",background:"linear-gradient(135deg,#E8A838,#D4953A)",color:"#1a1a2e",fontSize:14,fontWeight:700,fontFamily:F,cursor:"pointer",boxShadow:"0 4px 16px rgba(232,168,56,0.3)"}}>🔔 Enable Notifications</button>
+        {notif==="ok"&&<p style={{fontFamily:F,fontSize:13,color:"#7BA883",marginTop:10,marginBottom:0}}>✓ Notifications enabled!</p>}
+        {notif==="denied"&&<p style={{fontFamily:F,fontSize:13,color:"#D4453A",marginTop:10,marginBottom:0}}>Notifications blocked. Check browser settings.</p>}
+        {notif==="nosup"&&<p style={{fontFamily:F,fontSize:13,color:"#D4453A",marginTop:10,marginBottom:0}}>Browser doesn't support notifications.</p>}
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ───
+function App() {
+  const [projects,setProjects]=useState(()=>load("ww-projects-v3",[]));
+  const [view,setView]=useState("projects");
+  const [showForm,setShowForm]=useState(false);
+  const [editP,setEditP]=useState(null);
+  const [filter,setFilter]=useState("all");
+
+  useEffect(()=>{save("ww-projects-v3",projects);},[projects]);
+
+  const addOrUpdate=(p)=>{setProjects(prev=>{const ex=prev.find(x=>x.id===p.id);return ex?prev.map(x=>x.id===p.id?p:x):[p,...prev];});setShowForm(false);setEditP(null);};
+  const update=(p)=>setProjects(prev=>prev.map(x=>x.id===p.id?p:x));
+  const complete=(id)=>setProjects(prev=>prev.map(p=>p.id===id?{...p,completed:true}:p));
+  const restore=(id)=>setProjects(prev=>prev.map(p=>p.id===id?{...p,completed:false}:p));
+  const del=(id)=>setProjects(prev=>prev.filter(p=>p.id!==id));
+  const edit=(p)=>{setEditP(p);setShowForm(true);setView("projects");};
+
+  const active=projects.filter(p=>!p.completed);
+  const filtered=filter==="all"?active:active.filter(p=>p.category===filter);
+
+  return (
+    <div style={{minHeight:"100vh",background:"linear-gradient(180deg,#0f0f1e 0%,#151528 100%)",fontFamily:F}}>
+      <Header view={view} setView={v=>{setView(v);setShowForm(false);setEditP(null);}} count={active.length} />
+      <div style={{maxWidth:640,margin:"0 auto",padding:"20px 16px 60px"}}>
+        {view==="projects"&&<>
+          {!showForm&&<button onClick={()=>{setShowForm(true);setEditP(null);}} style={{width:"100%",padding:14,borderRadius:10,border:"2px dashed rgba(232,168,56,0.3)",background:"rgba(232,168,56,0.05)",color:"#E8A838",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:F,marginBottom:16}}>+ Add New Project</button>}
+          {showForm&&<ProjectForm onAdd={addOrUpdate} onCancel={()=>{setShowForm(false);setEditP(null);}} editProject={editP} />}
+          {active.length>0&&<div style={{display:"flex",gap:6,marginBottom:14}}>{[{id:"all",label:"All",icon:"📋"},...CATEGORIES].map(c=><button key={c.id} onClick={()=>setFilter(c.id)} style={{padding:"5px 12px",borderRadius:6,border:"none",background:filter===c.id?"rgba(232,168,56,0.15)":"rgba(255,255,255,0.04)",color:filter===c.id?"#E8A838":"rgba(255,255,255,0.4)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:F}}>{c.icon} {c.label}</button>)}</div>}
+          {filtered.length===0&&!showForm&&<div style={{textAlign:"center",padding:"60px 20px",color:"rgba(255,255,255,0.3)"}}><div style={{fontSize:48,marginBottom:12}}>🔧</div><p style={{fontSize:15}}>No projects yet.</p><p style={{fontSize:13}}>Add your first weekend project above!</p></div>}
+          {filtered.map(p=><Card key={p.id} project={p} onComplete={complete} onDelete={del} onEdit={edit} onUpdate={update} />)}
+        </>}
+        {view==="plan"&&<Plan projects={projects} />}
+        {view==="completed"&&<Completed projects={projects} onDelete={del} onRestore={restore} />}
+        {view==="reminders"&&<Reminders />}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
