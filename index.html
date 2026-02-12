@@ -77,7 +77,10 @@ const F = "'DM Sans', sans-serif";
 const DF = "'Playfair Display', Georgia, serif";
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 const ytUrl = (n) => `https://www.youtube.com/results?search_query=${encodeURIComponent(n+" how to DIY")}`;
-const OWM_KEY = "90fc7bb1c9b3f48d76c82656fe6930cc";
+const OWM_KEY = null; // loaded from localStorage at runtime
+
+function getApiKey() { return localStorage.getItem("ww-owm-key") || ""; }
+function setApiKey(k) { localStorage.setItem("ww-owm-key", k); }
 
 // ─── localStorage helpers ───
 function load(key, fb) {
@@ -358,25 +361,30 @@ function Plan({ projects }) {
   const [mode,setMode]=useState("api");
   const [manualIdx,setManualIdx]=useState(0);
   const [thresholds,setThresholds]=useState(()=>load("ww-thresholds",{...DEFAULT_THRESHOLDS}));
+  const [apiKey,setApiKey]=useState(()=>getApiKey());
+  const [showKeyInput,setShowKeyInput]=useState(()=>!getApiKey());
+  const [keyDraft,setKeyDraft]=useState(()=>getApiKey());
   const active=projects.filter(p=>!p.completed);
 
   const updateThresholds=(t)=>{setThresholds(t);save("ww-thresholds",t);setSug(null);};
 
   const fetchWeather=async(lat,lon,cityName)=>{
+    const key=getApiKey();
+    if(!key){setError("No API key set. Enter your OpenWeatherMap key above.");return;}
     setLoading(true);setError(null);setWeather(null);setSug(null);
     try {
       let finalLat=lat,finalLon=lon,resolvedCity=cityName||"";
       if(lat==null&&cityName){
-        const geoRes=await fetch(`https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(cityName)}&limit=1&appid=${OWM_KEY}`);
+        const geoRes=await fetch(`https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(cityName)}&limit=1&appid=${key}`);
         if(!geoRes.ok)throw new Error("City not found");
         const geoData=await geoRes.json();
         if(!geoData.length)throw new Error("City not found. Try a different name.");
         finalLat=geoData[0].lat;finalLon=geoData[0].lon;
         resolvedCity=`${geoData[0].name}${geoData[0].state?", "+geoData[0].state:""}`;
       }
-      const res=await fetch(`https://api.openweathermap.org/data/3.0/onecall?lat=${finalLat}&lon=${finalLon}&exclude=minutely,hourly,alerts&units=imperial&appid=${OWM_KEY}`);
+      const res=await fetch(`https://api.openweathermap.org/data/3.0/onecall?lat=${finalLat}&lon=${finalLon}&exclude=minutely,hourly,alerts&units=imperial&appid=${key}`);
       if(!res.ok){
-        const res2=await fetch(`https://api.openweathermap.org/data/2.5/forecast?lat=${finalLat}&lon=${finalLon}&units=imperial&appid=${OWM_KEY}`);
+        const res2=await fetch(`https://api.openweathermap.org/data/2.5/forecast?lat=${finalLat}&lon=${finalLon}&units=imperial&appid=${key}`);
         if(!res2.ok)throw new Error("Weather API error. Check your API key.");
         const data2=await res2.json();
         const grouped={};
@@ -474,6 +482,27 @@ function Plan({ projects }) {
           </div>
         </div>
         {mode==="api"&&<>
+          {/* API Key Management */}
+          {showKeyInput||!apiKey?(
+            <div style={{background:"rgba(255,255,255,0.03)",borderRadius:8,padding:14,marginBottom:14,border:"1px solid rgba(255,255,255,0.08)"}}>
+              <label style={{...LS,marginBottom:8}}>🔑 OpenWeatherMap API Key</label>
+              <p style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.35)",margin:"0 0 10px"}}>
+                {!apiKey?"Enter your free API key to enable live weather. ":""}
+                Get one at <a href="https://openweathermap.org/api" target="_blank" rel="noopener noreferrer" style={{color:"#E8A838"}}>openweathermap.org</a>
+              </p>
+              <div style={{display:"flex",gap:8}}>
+                <input value={keyDraft} onChange={e=>setKeyDraft(e.target.value)} placeholder="Paste your API key here..."
+                  type="password" style={{...IS,padding:"8px 12px",fontSize:13}} />
+                <button onClick={()=>{const k=keyDraft.trim();if(k){setApiKey(k);setShowKeyInput(false);localStorage.setItem("ww-owm-key",k);}}}
+                  style={{...SB,background:keyDraft.trim()?"#E8A838":"rgba(232,168,56,0.2)",color:keyDraft.trim()?"#1a1a2e":"rgba(26,26,46,0.5)",padding:"8px 16px",flexShrink:0,fontWeight:700}}>Save</button>
+              </div>
+            </div>
+          ):(
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <span style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.35)"}}>🔑 API key saved (••••{apiKey.slice(-4)})</span>
+              <button onClick={()=>setShowKeyInput(true)} style={{...SB,background:"rgba(255,255,255,0.06)",color:"rgba(255,255,255,0.4)",padding:"3px 10px"}}>Change Key</button>
+            </div>
+          )}
           <p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.45)",margin:"0 0 14px"}}>{savedCity?`Last checked: ${savedCity}. `:""}Get your local forecast to plan the perfect weekend.</p>
           <div style={{display:"flex",gap:8,marginBottom:12}}>
             <button onClick={useGPS} style={{padding:"10px 18px",borderRadius:8,border:"none",background:"linear-gradient(135deg,#E8A838,#D4953A)",color:"#1a1a2e",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:F,whiteSpace:"nowrap"}}>📍 Use My Location</button>
