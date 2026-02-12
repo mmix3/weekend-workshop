@@ -57,6 +57,7 @@ document.querySelector('link[rel=manifest]').href = mUrl;
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
 <script type="text/babel">
 const { useState, useEffect, useRef } = React;
@@ -88,6 +89,145 @@ function load(key, fb) {
 }
 function save(key, v) {
   try { localStorage.setItem(key, JSON.stringify(v)); } catch(e) { console.error(e); }
+}
+
+// ─── Export helpers ───
+function sanitizeName(name) {
+  return name.replace(/[^a-zA-Z0-9 _-]/g,"").replace(/\s+/g,"_").slice(0,50);
+}
+
+function dataUrlToBlob(dataUrl) {
+  const [header,data] = dataUrl.split(",");
+  const mime = header.match(/:(.*?);/)?.[1] || "application/octet-stream";
+  const bin = atob(data);
+  const arr = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  return new Blob([arr],{type:mime});
+}
+
+function extFromMime(mime) {
+  if(!mime) return ".bin";
+  if(mime.includes("jpeg")||mime.includes("jpg")) return ".jpg";
+  if(mime.includes("png")) return ".png";
+  if(mime.includes("gif")) return ".gif";
+  if(mime.includes("webp")) return ".webp";
+  if(mime.includes("pdf")) return ".pdf";
+  return ".bin";
+}
+
+function extFromDataUrl(dataUrl) {
+  const mime = dataUrl.match(/data:(.*?);/)?.[1]||"";
+  return extFromMime(mime);
+}
+
+function buildProjectSummary(p) {
+  const cat = CATEGORIES.find(c=>c.id===p.category);
+  const pri = PRIORITIES.find(x=>x.id===p.priority);
+  const lines = [
+    `Project: ${p.name}`,
+    `Category: ${cat?.label||p.category} | Priority: ${pri?.label||p.priority} | Time: ${p.timeEstimate}`,
+    `Status: ${p.completed?"Completed":"Active"}`,
+    `Created: ${new Date(p.createdAt).toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"})}`,
+    "",
+  ];
+  if(p.description) lines.push(`Description: ${p.description}`,"");
+  if(p.directions?.url) lines.push(`Directions URL: ${p.directions.url}`,"");
+  if(p.materials?.length) {
+    lines.push("Materials:");
+    p.materials.forEach(m=>lines.push(`  ${m.got?"[x]":"[ ]"} ${m.name||"(unnamed)"}`));
+    lines.push("");
+  }
+  if(p.notes?.length) {
+    lines.push("Progress Notes:");
+    p.notes.forEach(n=>lines.push(`  [${new Date(n.ts).toLocaleDateString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})}] ${n.text}`));
+    lines.push("");
+  }
+  if(p.receipts?.length) lines.push(`Receipts: ${p.receipts.length} attached (see receipts/ folder)`,"");
+  return lines.join("\n");
+}
+
+async function exportProjectZip(project) {
+  const zip = new JSZip();
+  const folder = sanitizeName(project.name);
+  const pf = zip.folder(folder);
+
+  // Project summary
+  pf.file("project-summary.txt", buildProjectSummary(project));
+
+  // Receipts
+  if(project.receipts?.length) {
+    const rf = pf.folder("receipts");
+    project.receipts.forEach((r,i)=>{
+      const ext = extFromDataUrl(r.photo);
+      const name = `receipt_${i+1}_${sanitizeName(r.label||"receipt")}${ext}`;
+      rf.file(name, dataUrlToBlob(r.photo));
+    });
+  }
+
+  // Direction files
+  if(project.directions?.files?.length) {
+    const df = pf.folder("directions");
+    project.directions.files.forEach((f,i)=>{
+      const ext = extFromDataUrl(f.data);
+      const name = `directions_${i+1}_${sanitizeName(f.name||"file")}${ext}`;
+      df.file(name, dataUrlToBlob(f.data));
+    });
+  }
+
+  // Progress photos
+  const photosNotes = (project.notes||[]).filter(n=>n.photo);
+  if(photosNotes.length) {
+    const pf2 = pf.folder("progress_photos");
+    photosNotes.forEach((n,i)=>{
+      const ext = extFromDataUrl(n.photo);
+      pf2.file(`photo_${i+1}${ext}`, dataUrlToBlob(n.photo));
+    });
+  }
+
+  const blob = await zip.generateAsync({type:"blob"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `${folder}.zip`; a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function exportAllProjectsZip(projects) {
+  const zip = new JSZip();
+  const timestamp = new Date().toISOString().slice(0,10);
+
+  projects.forEach(p=>{
+    const folder = sanitizeName(p.name);
+    const pf = zip.folder(`${p.completed?"completed":"active"}/${folder}`);
+    pf.file("project-summary.txt", buildProjectSummary(p));
+    if(p.receipts?.length) {
+      const rf = pf.folder("receipts");
+      p.receipts.forEach((r,i)=>{
+        rf.file(`receipt_${i+1}${extFromDataUrl(r.photo)}`, dataUrlToBlob(r.photo));
+      });
+    }
+    if(p.directions?.files?.length) {
+      const df = pf.folder("directions");
+      p.directions.files.forEach((f,i)=>{
+        df.file(`directions_${i+1}${extFromDataUrl(f.data)}`, dataUrlToBlob(f.data));
+      });
+    }
+    const photos = (p.notes||[]).filter(n=>n.photo);
+    if(photos.length) {
+      const phf = pf.folder("progress_photos");
+      photos.forEach((n,i)=>{
+        phf.file(`photo_${i+1}${extFromDataUrl(n.photo)}`, dataUrlToBlob(n.photo));
+      });
+    }
+  });
+
+  // Also include a master JSON backup
+  zip.file("weekend-workshop-backup.json", JSON.stringify(projects, null, 2));
+
+  const blob = await zip.generateAsync({type:"blob"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `weekend-workshop-backup-${timestamp}.zip`; a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ─── Weather helpers ───
@@ -225,6 +365,96 @@ function Notes({ notes, onChange }) {
   );
 }
 
+// ─── Receipts ───
+function Receipts({ receipts, onChange }) {
+  const fRef=useRef(null);
+  const addReceipt=()=>{fRef.current?.click();};
+  const onFile=(e)=>{
+    const file=e.target.files?.[0];if(!file)return;
+    const r=new FileReader();
+    r.onload=(ev)=>{onChange([...receipts,{id:uid(),photo:ev.target.result,label:file.name,ts:Date.now()}]);};
+    r.readAsDataURL(file);e.target.value="";
+  };
+  const rm=(id)=>onChange(receipts.filter(r=>r.id!==id));
+  return (
+    <div style={{marginTop:12}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+        <label style={{...LS,margin:0}}>🧾 Receipts</label>
+        <button onClick={addReceipt} style={{...SB,background:"rgba(232,168,56,0.12)",color:"#E8A838"}}>+ Add Receipt</button>
+      </div>
+      <input ref={fRef} type="file" accept="image/*,.pdf" capture="environment" style={{display:"none"}} onChange={onFile} />
+      {receipts.length===0&&<p style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.3)",margin:"4px 0 0"}}>No receipts attached.</p>}
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        {receipts.map(r=>(
+          <div key={r.id} style={{position:"relative",borderRadius:8,overflow:"hidden",border:"1px solid rgba(255,255,255,0.1)",width:100}}>
+            {r.photo.startsWith("data:image")?
+              <img src={r.photo} alt={r.label} style={{width:100,height:80,objectFit:"cover",display:"block"}} />:
+              <div style={{width:100,height:80,background:"rgba(255,255,255,0.05)",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:24}}>📄</span></div>
+            }
+            <div style={{padding:"4px 6px",background:"rgba(0,0,0,0.4)"}}>
+              <p style={{fontFamily:F,fontSize:9,color:"rgba(255,255,255,0.6)",margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.label}</p>
+            </div>
+            <button onClick={()=>rm(r.id)} style={{position:"absolute",top:2,right:2,width:18,height:18,borderRadius:9,border:"none",background:"rgba(212,69,58,0.85)",color:"white",fontSize:10,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>✕</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Directions ───
+function Directions({ directions, onChange }) {
+  const [urlDraft,setUrlDraft]=useState("");
+  const fRef=useRef(null);
+  const dir=directions||{url:"",files:[]};
+
+  const saveUrl=()=>{onChange({...dir,url:urlDraft.trim()});};
+  const addFile=()=>{fRef.current?.click();};
+  const onFile=(e)=>{
+    const file=e.target.files?.[0];if(!file)return;
+    const r=new FileReader();
+    r.onload=(ev)=>{onChange({...dir,files:[...(dir.files||[]),{id:uid(),data:ev.target.result,name:file.name,type:file.type}]});};
+    r.readAsDataURL(file);e.target.value="";
+  };
+  const rmFile=(id)=>onChange({...dir,files:(dir.files||[]).filter(f=>f.id!==id)});
+  const clearUrl=()=>{onChange({...dir,url:""});setUrlDraft("");};
+
+  useEffect(()=>{setUrlDraft(dir.url||"");},[directions]);
+
+  return (
+    <div style={{marginTop:12}}>
+      <label style={{...LS,marginBottom:8}}>📋 Directions / Instructions</label>
+      {/* URL */}
+      <p style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.35)",margin:"0 0 6px"}}>Link to online directions:</p>
+      <div style={{display:"flex",gap:8,marginBottom:10}}>
+        <input value={urlDraft} onChange={e=>setUrlDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveUrl()}
+          placeholder="https://example.com/manual.pdf" style={{...IS,padding:"8px 12px",fontSize:13}} />
+        {dir.url?
+          <button onClick={clearUrl} style={{...SB,background:"rgba(212,69,58,0.1)",color:"#D4453A",padding:"8px 12px",flexShrink:0}}>✕</button>:
+          <button onClick={saveUrl} disabled={!urlDraft.trim()} style={{...SB,background:urlDraft.trim()?"#E8A838":"rgba(232,168,56,0.2)",color:urlDraft.trim()?"#1a1a2e":"rgba(26,26,46,0.5)",padding:"8px 14px",flexShrink:0}}>Save</button>
+        }
+      </div>
+      {dir.url&&<a href={dir.url} target="_blank" rel="noopener noreferrer" style={{fontFamily:F,fontSize:12,color:"#E8A838",display:"inline-block",marginBottom:10,wordBreak:"break-all"}}>🔗 {dir.url}</a>}
+      {/* File uploads */}
+      <p style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.35)",margin:"0 0 6px"}}>Or upload direction documents/images:</p>
+      <input ref={fRef} type="file" accept="image/*,.pdf" style={{display:"none"}} onChange={onFile} />
+      <button onClick={addFile} style={{...SB,background:"rgba(232,168,56,0.12)",color:"#E8A838",marginBottom:8}}>📎 Upload File</button>
+      {(dir.files||[]).map(f=>(
+        <div key={f.id} style={{display:"flex",gap:8,alignItems:"center",marginBottom:6,background:"rgba(255,255,255,0.03)",borderRadius:6,padding:"6px 10px"}}>
+          <span style={{fontSize:16}}>{f.type?.includes("pdf")?"📄":"🖼️"}</span>
+          {f.type?.includes("image")?
+            <img src={f.data} alt={f.name} style={{width:40,height:40,objectFit:"cover",borderRadius:4,flexShrink:0}} />:null
+          }
+          <span style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.6)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.name}</span>
+          {f.type?.includes("image")&&<a href={f.data} target="_blank" rel="noopener noreferrer" style={{...SB,background:"rgba(255,255,255,0.06)",color:"rgba(255,255,255,0.5)",padding:"3px 8px",textDecoration:"none"}}>View</a>}
+          <button onClick={()=>rmFile(f.id)} style={{...SB,background:"rgba(212,69,58,0.08)",color:"#D4453A",padding:"3px 8px"}}>✕</button>
+        </div>
+      ))}
+      {(!dir.files||dir.files.length===0)&&!dir.url&&<p style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.25)",margin:"4px 0 0"}}>No directions attached yet.</p>}
+    </div>
+  );
+}
+
 // ─── Project Form ───
 function ProjectForm({ onAdd, onCancel, editProject:ep }) {
   const [name,setName]=useState(ep?.name||"");
@@ -233,7 +463,8 @@ function ProjectForm({ onAdd, onCancel, editProject:ep }) {
   const [pri,setPri]=useState(ep?.priority||"medium");
   const [time,setTime]=useState(ep?.timeEstimate||"1 – 2 hrs");
   const [mats,setMats]=useState(ep?.materials||[]);
-  const submit=()=>{if(!name.trim())return;onAdd({id:ep?.id||uid(),name:name.trim(),description:desc.trim(),category:cat,priority:pri,timeEstimate:time,materials:mats,notes:ep?.notes||[],completed:ep?.completed||false,createdAt:ep?.createdAt||Date.now()});};
+  const [dirUrl,setDirUrl]=useState(ep?.directions?.url||"");
+  const submit=()=>{if(!name.trim())return;onAdd({id:ep?.id||uid(),name:name.trim(),description:desc.trim(),category:cat,priority:pri,timeEstimate:time,materials:mats,directions:{url:dirUrl.trim(),files:ep?.directions?.files||[]},receipts:ep?.receipts||[],notes:ep?.notes||[],completed:ep?.completed||false,createdAt:ep?.createdAt||Date.now()});};
   const sel={...IS,cursor:"pointer",appearance:"none",backgroundImage:"url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23E8A838' d='M6 8L1 3h10z'/%3E%3C/svg%3E\")",backgroundRepeat:"no-repeat",backgroundPosition:"right 12px center",paddingRight:32};
   return (
     <div style={{background:"rgba(255,255,255,0.04)",borderRadius:12,padding:20,border:"1px solid rgba(232,168,56,0.15)",marginBottom:16}}>
@@ -260,6 +491,11 @@ function ProjectForm({ onAdd, onCancel, editProject:ep }) {
         </div>
       </div>
       <Materials items={mats} onChange={setMats} />
+      <div style={{marginTop:12,marginBottom:4}}>
+        <label style={LS}>📋 Directions URL (optional)</label>
+        <input value={dirUrl} onChange={e=>setDirUrl(e.target.value)} placeholder="https://example.com/manual.pdf" style={{...IS,padding:"8px 12px",fontSize:13}} />
+        <p style={{fontFamily:F,fontSize:11,color:"rgba(255,255,255,0.25)",marginTop:4}}>You can upload direction files and receipt images after creating the project.</p>
+      </div>
       <div style={{display:"flex",gap:10,justifyContent:"flex-end",marginTop:16}}>
         <button onClick={onCancel} style={{padding:"9px 20px",borderRadius:8,border:"1px solid rgba(255,255,255,0.15)",background:"transparent",color:"rgba(255,255,255,0.6)",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:F}}>Cancel</button>
         <button onClick={submit} style={{padding:"9px 24px",borderRadius:8,border:"none",background:name.trim()?"#E8A838":"rgba(232,168,56,0.3)",color:name.trim()?"#1a1a2e":"rgba(26,26,46,0.5)",fontSize:14,fontWeight:700,cursor:name.trim()?"pointer":"default",fontFamily:F}}>{ep?"Save Changes":"Add Project"}</button>
@@ -273,6 +509,8 @@ function Card({ project:p, onComplete, onDelete, onEdit, onUpdate }) {
   const [exp,setExp]=useState(false);
   const cat=CATEGORIES.find(c=>c.id===p.category),pri=PRIORITIES.find(x=>x.id===p.priority);
   const mc=p.materials?.length||0,mg=p.materials?.filter(m=>m.got).length||0,nc=p.notes?.length||0;
+  const rc=p.receipts?.length||0;
+  const hasDir=!!(p.directions?.url||(p.directions?.files||[]).length);
   const togMat=(mid)=>onUpdate({...p,materials:p.materials.map(m=>m.id===mid?{...m,got:!m.got}:m)});
   const badge=(bg,col,txt)=>(<span style={{fontSize:11,fontWeight:600,padding:"2px 8px",borderRadius:4,background:bg,color:col,fontFamily:F}}>{txt}</span>);
   return (
@@ -285,12 +523,15 @@ function Card({ project:p, onComplete, onDelete, onEdit, onUpdate }) {
             {badge("rgba(255,255,255,0.06)","rgba(255,255,255,0.5)",`⏱ ${p.timeEstimate}`)}
             {mc>0&&badge(mg===mc?"rgba(123,168,131,0.15)":"rgba(255,255,255,0.06)",mg===mc?"#7BA883":"rgba(255,255,255,0.5)",`🛒 ${mg}/${mc}`)}
             {nc>0&&badge("rgba(255,255,255,0.06)","rgba(255,255,255,0.5)",`📝 ${nc}`)}
+            {hasDir&&badge("rgba(107,143,212,0.15)","#6B8FD4","📋 Dirs")}
+            {rc>0&&badge("rgba(232,168,56,0.15)","#E8A838",`🧾 ${rc}`)}
           </div>
           {p.description&&<p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.45)",margin:0,lineHeight:1.5}}>{p.description}</p>}
           <span style={{fontFamily:F,fontSize:11,color:"rgba(255,255,255,0.25)",marginTop:4,display:"inline-block"}}>{exp?"▲ Collapse":"▼ Tap for details"}</span>
         </div>
         <div style={{display:"flex",gap:6,flexShrink:0,flexWrap:"wrap",justifyContent:"flex-end"}}>
           <a href={ytUrl(p.name)} target="_blank" rel="noopener noreferrer" style={{width:32,height:32,borderRadius:6,background:"rgba(255,0,0,0.12)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,textDecoration:"none"}}>▶️</a>
+          <button onClick={(e)=>{e.stopPropagation();exportProjectZip(p);}} title="Export project" style={{width:32,height:32,borderRadius:6,background:"rgba(107,143,212,0.12)",border:"none",color:"#6B8FD4",fontSize:14,cursor:"pointer"}}>💾</button>
           <button onClick={()=>onEdit(p)} style={{width:32,height:32,borderRadius:6,background:"rgba(255,255,255,0.06)",border:"none",color:"rgba(255,255,255,0.5)",fontSize:14,cursor:"pointer"}}>✏️</button>
           <button onClick={()=>onComplete(p.id)} style={{width:32,height:32,borderRadius:6,background:"rgba(123,168,131,0.15)",border:"none",color:"#7BA883",fontSize:14,cursor:"pointer"}}>✓</button>
           <button onClick={()=>onDelete(p.id)} style={{width:32,height:32,borderRadius:6,background:"rgba(212,69,58,0.1)",border:"none",color:"#D4453A",fontSize:14,cursor:"pointer"}}>✕</button>
@@ -307,6 +548,8 @@ function Card({ project:p, onComplete, onDelete, onEdit, onUpdate }) {
               </div>
             ))}
           </div>}
+          <Directions directions={p.directions} onChange={(d)=>onUpdate({...p,directions:d})} />
+          <Receipts receipts={p.receipts||[]} onChange={(r)=>onUpdate({...p,receipts:r})} />
           <Notes notes={p.notes||[]} onChange={(nn)=>onUpdate({...p,notes:nn})} />
         </div>
       )}
@@ -571,21 +814,71 @@ function Plan({ projects }) {
 }
 
 // ─── Completed ───
+function CompletedCard({ p }) {
+  const [exp,setExp]=useState(false);
+  const cat=CATEGORIES.find(c=>c.id===p.category);
+  const rc=p.receipts?.length||0;
+  const hasDir=!!(p.directions?.url||(p.directions?.files||[]).length);
+  return (
+    <div style={{background:"rgba(123,168,131,0.06)",borderRadius:10,marginBottom:8,borderLeft:"4px solid rgba(123,168,131,0.4)",overflow:"hidden"}}>
+      <div style={{padding:14,display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}} onClick={()=>setExp(!exp)}>
+        <div style={{flex:1,minWidth:0}}>
+          <span style={{fontFamily:DF,fontSize:15,color:"rgba(255,255,255,0.5)",textDecoration:"line-through"}}>{cat?.icon} {p.name}</span>
+          {(rc>0||hasDir)&&<div style={{display:"flex",gap:6,marginTop:4}}>
+            {hasDir&&<span style={{fontSize:10,fontWeight:600,padding:"1px 6px",borderRadius:3,background:"rgba(107,143,212,0.12)",color:"#6B8FD4",fontFamily:F}}>📋 Dirs</span>}
+            {rc>0&&<span style={{fontSize:10,fontWeight:600,padding:"1px 6px",borderRadius:3,background:"rgba(232,168,56,0.12)",color:"#E8A838",fontFamily:F}}>🧾 {rc} receipt{rc!==1?"s":""}</span>}
+          </div>}
+        </div>
+        <span style={{fontFamily:F,fontSize:11,color:"rgba(255,255,255,0.25)",marginRight:8}}>{exp?"▲":"▼"}</span>
+      </div>
+      {exp&&<div style={{padding:"0 14px 14px",borderTop:"1px solid rgba(255,255,255,0.05)"}}>
+        {p.directions?.url&&<div style={{marginTop:10}}><label style={{...LS,marginBottom:4}}>📋 Directions</label><a href={p.directions.url} target="_blank" rel="noopener noreferrer" style={{fontFamily:F,fontSize:12,color:"#E8A838",wordBreak:"break-all"}}>🔗 {p.directions.url}</a></div>}
+        {(p.directions?.files||[]).length>0&&<div style={{marginTop:8}}>{p.directions.files.map(f=>(
+          <div key={f.id} style={{display:"flex",gap:6,alignItems:"center",marginBottom:4}}>
+            <span style={{fontSize:14}}>{f.type?.includes("pdf")?"📄":"🖼️"}</span>
+            <span style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.5)"}}>{f.name}</span>
+            {f.type?.includes("image")&&<a href={f.data} target="_blank" rel="noopener noreferrer" style={{fontFamily:F,fontSize:11,color:"#E8A838",textDecoration:"none"}}>View</a>}
+          </div>
+        ))}</div>}
+        {rc>0&&<div style={{marginTop:10}}>
+          <label style={{...LS,marginBottom:6}}>🧾 Receipts</label>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {p.receipts.map(r=>(
+              <div key={r.id} style={{borderRadius:6,overflow:"hidden",border:"1px solid rgba(255,255,255,0.1)",width:80}}>
+                {r.photo.startsWith("data:image")?
+                  <a href={r.photo} target="_blank" rel="noopener noreferrer"><img src={r.photo} alt={r.label} style={{width:80,height:60,objectFit:"cover",display:"block"}} /></a>:
+                  <div style={{width:80,height:60,background:"rgba(255,255,255,0.05)",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:20}}>📄</span></div>
+                }
+                <div style={{padding:"2px 4px",background:"rgba(0,0,0,0.3)"}}><p style={{fontFamily:F,fontSize:8,color:"rgba(255,255,255,0.5)",margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.label}</p></div>
+              </div>
+            ))}
+          </div>
+        </div>}
+        {(p.notes||[]).length>0&&<div style={{marginTop:10}}>
+          <label style={{...LS,marginBottom:6}}>📝 Notes ({p.notes.length})</label>
+          {p.notes.map(n=><p key={n.id} style={{fontFamily:F,fontSize:12,color:"rgba(255,255,255,0.4)",margin:"0 0 4px"}}>• {n.text}</p>)}
+        </div>}
+      </div>}
+    </div>
+  );
+}
+
 function Completed({ projects, onDelete, onRestore }) {
   const done=projects.filter(p=>p.completed);
   if(!done.length) return <div style={{textAlign:"center",padding:"60px 20px",color:"rgba(255,255,255,0.35)",fontFamily:F}}><div style={{fontSize:48,marginBottom:12}}>🏗️</div><p style={{fontSize:15}}>No completed projects yet.</p><p style={{fontSize:13}}>Get to work this weekend!</p></div>;
   return (
     <div>
       <p style={{fontFamily:F,fontSize:13,color:"rgba(255,255,255,0.4)",marginBottom:12}}>{done.length} project{done.length!==1?"s":""} done — nice work! 💪</p>
-      {done.map(p=>{const cat=CATEGORIES.find(c=>c.id===p.category);return(
-        <div key={p.id} style={{background:"rgba(123,168,131,0.06)",borderRadius:10,padding:14,marginBottom:8,borderLeft:"4px solid rgba(123,168,131,0.4)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{fontFamily:DF,fontSize:15,color:"rgba(255,255,255,0.5)",textDecoration:"line-through"}}>{cat?.icon} {p.name}</span>
-          <div style={{display:"flex",gap:6}}>
+      {done.map(p=>(
+        <div key={p.id}>
+          <CompletedCard p={p} />
+          <div style={{display:"flex",gap:6,justifyContent:"flex-end",marginTop:-4,marginBottom:12}}>
+            <button onClick={()=>exportProjectZip(p)} style={{...SB,background:"rgba(107,143,212,0.12)",color:"#6B8FD4"}}>💾 Export</button>
             <button onClick={()=>onRestore(p.id)} style={{...SB,background:"rgba(232,168,56,0.12)",color:"#E8A838"}}>↩ Restore</button>
-            <button onClick={()=>onDelete(p.id)} style={{...SB,background:"rgba(212,69,58,0.1)",color:"#D4453A"}}>✕</button>
+            <button onClick={()=>onDelete(p.id)} style={{...SB,background:"rgba(212,69,58,0.1)",color:"#D4453A"}}>✕ Delete</button>
           </div>
         </div>
-      );})}
+      ))}
     </div>
   );
 }
@@ -643,9 +936,21 @@ function App() {
 
   useEffect(()=>{save("ww-projects-v3",projects);},[projects]);
 
+  const [autoExport,setAutoExport]=useState(()=>load("ww-auto-export",true));
+  const toggleAutoExport=()=>{const v=!autoExport;setAutoExport(v);save("ww-auto-export",v);};
+
   const addOrUpdate=(p)=>{setProjects(prev=>{const ex=prev.find(x=>x.id===p.id);return ex?prev.map(x=>x.id===p.id?p:x):[p,...prev];});setShowForm(false);setEditP(null);};
   const update=(p)=>setProjects(prev=>prev.map(x=>x.id===p.id?p:x));
-  const complete=(id)=>setProjects(prev=>prev.map(p=>p.id===id?{...p,completed:true}:p));
+  const complete=(id)=>{
+    setProjects(prev=>{
+      const updated=prev.map(p=>p.id===id?{...p,completed:true}:p);
+      if(autoExport){
+        const proj=updated.find(p=>p.id===id);
+        if(proj)setTimeout(()=>exportProjectZip(proj),300);
+      }
+      return updated;
+    });
+  };
   const restore=(id)=>setProjects(prev=>prev.map(p=>p.id===id?{...p,completed:false}:p));
   const del=(id)=>setProjects(prev=>prev.filter(p=>p.id!==id));
   const edit=(p)=>{setEditP(p);setShowForm(true);setView("projects");};
@@ -660,6 +965,19 @@ function App() {
         {view==="projects"&&<>
           {!showForm&&<button onClick={()=>{setShowForm(true);setEditP(null);}} style={{width:"100%",padding:14,borderRadius:10,border:"2px dashed rgba(232,168,56,0.3)",background:"rgba(232,168,56,0.05)",color:"#E8A838",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:F,marginBottom:16}}>+ Add New Project</button>}
           {showForm&&<ProjectForm onAdd={addOrUpdate} onCancel={()=>{setShowForm(false);setEditP(null);}} editProject={editP} />}
+          {/* Export controls */}
+          {projects.length>0&&!showForm&&<div style={{background:"rgba(255,255,255,0.03)",borderRadius:8,padding:"10px 14px",marginBottom:14,border:"1px solid rgba(255,255,255,0.06)",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <button onClick={()=>exportAllProjectsZip(projects)} style={{...SB,background:"rgba(107,143,212,0.15)",color:"#6B8FD4",padding:"6px 12px"}}>💾 Export All</button>
+              <span style={{fontFamily:F,fontSize:11,color:"rgba(255,255,255,0.3)"}}>Download ZIP backup</span>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer"}} onClick={toggleAutoExport}>
+              <div style={{width:32,height:18,borderRadius:9,background:autoExport?"#7BA883":"rgba(255,255,255,0.15)",padding:2,transition:"background 0.2s"}}>
+                <div style={{width:14,height:14,borderRadius:7,background:"white",transform:autoExport?"translateX(14px)":"translateX(0)",transition:"transform 0.2s"}} />
+              </div>
+              <span style={{fontFamily:F,fontSize:11,color:"rgba(255,255,255,0.4)"}}>Auto-export on complete</span>
+            </div>
+          </div>}
           {active.length>0&&<div style={{display:"flex",gap:6,marginBottom:14}}>{[{id:"all",label:"All",icon:"📋"},...CATEGORIES].map(c=><button key={c.id} onClick={()=>setFilter(c.id)} style={{padding:"5px 12px",borderRadius:6,border:"none",background:filter===c.id?"rgba(232,168,56,0.15)":"rgba(255,255,255,0.04)",color:filter===c.id?"#E8A838":"rgba(255,255,255,0.4)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:F}}>{c.icon} {c.label}</button>)}</div>}
           {filtered.length===0&&!showForm&&<div style={{textAlign:"center",padding:"60px 20px",color:"rgba(255,255,255,0.3)"}}><div style={{fontSize:48,marginBottom:12}}>🔧</div><p style={{fontSize:15}}>No projects yet.</p><p style={{fontSize:13}}>Add your first weekend project above!</p></div>}
           {filtered.map(p=><Card key={p.id} project={p} onComplete={complete} onDelete={del} onEdit={edit} onUpdate={update} />)}
